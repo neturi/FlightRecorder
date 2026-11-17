@@ -1,0 +1,7 @@
+# ninja log v7
+55	3226	8166001246108662	FlightRecorder/CMakeFiles/FlightRecorder.dir/main.cpp.obj	936fb784f32be5f2
+66	3234	8166001246210360	FlightRecorder/CMakeFiles/FlightRecorderTests.dir/flight_recorder_tests.cpp.obj	17b22079b472c769
+40	3592	8166001246018602	FlightRecorder/CMakeFiles/flight_recorder.dir/flight_recorder.cpp.obj	891091698e97034a
+3594	3775	8166001281478904	FlightRecorder/flight_recorder.lib	4bf0a12a14df3361
+3804	5195	8166001283604883	FlightRecorder/FlightRecorderTests.exe	719de25f9421cdfc
+3777	5232	8166001283320693	FlightRecorder/FlightRecorder.exe	7890c022f2e0628b
