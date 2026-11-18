@@ -14,6 +14,16 @@ namespace flightrecorder {
 
 enum class EvidenceKind { Log, Progress, Metric, Failure, KernelSample };
 
+enum class MonitoringKind { Network, DiskIo, Cpu, SystemHang, Other };
+
+struct MonitoringEvent {
+	std::chrono::system_clock::time_point time;
+	MonitoringKind kind = MonitoringKind::Other;
+	std::string severity;
+	std::string source;
+	std::string message;
+};
+
 struct Evidence {
 	std::chrono::system_clock::time_point time;
 	EvidenceKind kind;
@@ -58,6 +68,9 @@ public:
 	void report_failure(std::string component, std::string reason);
 	void heartbeat(std::string component);
 	void sample_kernel();
+	void ingest(MonitoringEvent event);
+	bool ingest_syslog(const std::string& line);
+	void poll_linux();
 	std::optional<Incident> incident() const;
 	std::vector<Evidence> recent() const;
 	std::size_t retained_bytes() const noexcept;
@@ -72,6 +85,9 @@ private:
 std::string redact(std::string message);
 std::string to_string(EvidenceKind kind);
 std::optional<EvidenceKind> evidence_kind_from_string(const std::string& value);
+std::string to_string(MonitoringKind kind);
+std::optional<MonitoringKind> monitoring_kind_from_string(const std::string& value);
+std::optional<MonitoringEvent> parse_syslog(const std::string& line);
 
 } // namespace flightrecorder
 

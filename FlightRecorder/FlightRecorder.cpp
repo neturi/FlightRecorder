@@ -4,6 +4,8 @@
 #include "FlightRecorder.h"
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -54,6 +56,53 @@ namespace flightrecorder {
 			if (to_string(kind) == value) return kind;
 		return std::nullopt;
 	}
+	std::string to_string(MonitoringKind kind) {
+		switch (kind) {
+		case MonitoringKind::Network: return "network";
+		case MonitoringKind::DiskIo: return "disk_io";
+		case MonitoringKind::Cpu: return "cpu";
+		case MonitoringKind::SystemHang: return "system_hang";
+		case MonitoringKind::Other: return "other";
+		}
+		return "other";
+	}
+	std::optional<MonitoringKind> monitoring_kind_from_string(const std::string& value) {
+		for (auto kind : { MonitoringKind::Network, MonitoringKind::DiskIo, MonitoringKind::Cpu, MonitoringKind::SystemHang, MonitoringKind::Other })
+			if (to_string(kind) == value) return kind;
+		return std::nullopt;
+	}
+	std::optional<MonitoringEvent> parse_syslog(const std::string& line) {
+		if (line.empty()) return std::nullopt;
+		MonitoringEvent event;
+		event.time = Clock::now();
+		event.source = "syslog";
+		event.severity = "info";
+		event.message = line;
+		std::size_t start = 0;
+		if (line.front() == '<') {
+			auto end = line.find('>');
+			if (end == std::string::npos || end == 1) return std::nullopt;
+			try {
+				const int priority = std::stoi(line.substr(1, end - 1));
+				static const char* severities[] = { "emergency", "alert", "critical", "error", "warning", "notice", "info", "debug" };
+				event.severity = severities[std::clamp(priority % 8, 0, 7)];
+			}
+			catch (...) { return std::nullopt; }
+			start = end + 1;
+		}
+		std::string lower = line;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lower.find("network") != std::string::npos || lower.find("interface") != std::string::npos || lower.find("packet") != std::string::npos)
+			event.kind = MonitoringKind::Network;
+		else if (lower.find("disk") != std::string::npos || lower.find("i/o") != std::string::npos || lower.find("io wait") != std::string::npos)
+			event.kind = MonitoringKind::DiskIo;
+		else if (lower.find("cpu") != std::string::npos || lower.find("load average") != std::string::npos)
+			event.kind = MonitoringKind::Cpu;
+		else if (lower.find("hang") != std::string::npos || lower.find("stalled") != std::string::npos || lower.find("watchdog") != std::string::npos)
+			event.kind = MonitoringKind::SystemHang;
+		if (start < line.size()) event.message = line.substr(start);
+		return event;
+	}
 
 	std::string redact(std::string message) {
 		const std::vector<std::string> keys{ "password=", "token=", "authorization=", "secret=" };
@@ -80,6 +129,10 @@ namespace flightrecorder {
 		std::map<std::string, Clock::time_point> heartbeats;
 		std::optional<Incident> current;
 		unsigned long sequence = 0;
+		std::optional<std::uint64_t> previous_cpu_total;
+		std::optional<std::uint64_t> previous_cpu_idle;
+		std::optional<std::uint64_t> previous_disk_bytes;
+		std::optional<std::uint64_t> previous_network_bytes;
 
 		void append(EvidenceKind kind, std::string component, std::string message) {
 			Evidence item{ Clock::now(), kind, std::move(component), redact(std::move(message)) };
@@ -109,8 +162,77 @@ namespace flightrecorder {
 	void Recorder::metric(std::string component, std::string name, double value) { std::lock_guard lock(impl_->mutex); impl_->append(EvidenceKind::Metric, std::move(component), std::move(name) + " value=" + std::to_string(value)); }
 	void Recorder::heartbeat(std::string component) { std::lock_guard lock(impl_->mutex); impl_->heartbeats[component] = Clock::now(); impl_->append(EvidenceKind::Progress, component, "heartbeat"); }
 	void Recorder::report_failure(std::string component, std::string reason) { std::lock_guard lock(impl_->mutex); impl_->fail(std::move(component), std::move(reason)); }
+	void Recorder::ingest(MonitoringEvent event) {
+		std::lock_guard lock(impl_->mutex);
+		const auto evidence_kind = event.kind == MonitoringKind::SystemHang ? EvidenceKind::Failure : EvidenceKind::Metric;
+		const auto component = event.source.empty() ? "monitoring" : "monitoring/" + event.source;
+		impl_->append(evidence_kind, component, to_string(event.kind) + " severity=" + event.severity + " " + event.message);
+		if (event.kind == MonitoringKind::SystemHang) impl_->fail(component, event.message);
+	}
+	bool Recorder::ingest_syslog(const std::string& line) {
+		auto event = parse_syslog(line);
+		if (!event) return false;
+		ingest(std::move(*event));
+		return true;
+	}
+	void Recorder::poll_linux() {
+		std::lock_guard lock(impl_->mutex);
+#ifdef __linux__
+		const auto read_counter = [](const char* path, std::size_t column, bool include_header) -> std::optional<std::uint64_t> {
+			std::ifstream input(path);
+			if (!input) return std::nullopt;
+			std::string line;
+			std::uint64_t total = 0;
+			while (std::getline(input, line)) {
+				std::istringstream fields(line);
+				std::string value;
+				std::size_t index = 0;
+				while (fields >> value) {
+					if ((!include_header || index > 0) && index >= column) {
+						try { total += std::stoull(value); } catch (...) {}
+						break;
+					}
+					++index;
+				}
+			}
+			return total;
+		};
+		std::ifstream stat("/proc/stat");
+		std::string label;
+		std::uint64_t user = 0, nice = 0, system = 0, idle = 0, iowait = 0, irq = 0, softirq = 0, steal = 0;
+		if (stat >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal) {
+			const auto total = user + nice + system + idle + iowait + irq + softirq + steal;
+			if (impl_->previous_cpu_total && total > *impl_->previous_cpu_total && idle + iowait >= *impl_->previous_cpu_idle) {
+				const auto delta = total - *impl_->previous_cpu_total;
+				const auto busy = delta - std::min(delta, (idle + iowait) - *impl_->previous_cpu_idle);
+				const auto percent = 100.0 * static_cast<double>(busy) / static_cast<double>(delta);
+				impl_->append(EvidenceKind::Metric, "monitoring/cpu", "cpu_utilization_percent=" + std::to_string(percent));
+				if (percent >= 90.0) impl_->fail("monitoring/cpu", "cpu_spike");
+			}
+			impl_->previous_cpu_total = total;
+			impl_->previous_cpu_idle = idle + iowait;
+		}
+		if (const auto disk = read_counter("/proc/diskstats", 5, true)) {
+			if (impl_->previous_disk_bytes) impl_->append(EvidenceKind::Metric, "monitoring/disk_io", "sectors_delta=" + std::to_string(*disk - *impl_->previous_disk_bytes));
+			impl_->previous_disk_bytes = disk;
+		}
+		if (const auto network = read_counter("/proc/net/dev", 1, true)) {
+			if (impl_->previous_network_bytes) impl_->append(EvidenceKind::Metric, "monitoring/network", "bytes_delta=" + std::to_string(*network - *impl_->previous_network_bytes));
+			impl_->previous_network_bytes = network;
+		}
+		const auto now = Clock::now();
+		for (const auto& heartbeat : impl_->heartbeats) {
+			if (now - heartbeat.second > impl_->limits.heartbeat_timeout) {
+				impl_->fail("monitoring/system", "system_hang heartbeat_timeout component=" + heartbeat.first);
+				break;
+			}
+		}
+#else
+		impl_->append(EvidenceKind::KernelSample, "monitoring", "linux_polling_unavailable");
+#endif
+	}
 
-		void Recorder::sample_kernel() {
+	void Recorder::sample_kernel() {
 #ifdef __linux__
 		std::ifstream stat("/proc/self/status"); std::string line, result;
 		while (std::getline(stat, line)) if (line.rfind("VmRSS:", 0) == 0 || line.rfind("Threads:", 0) == 0) result += line + " ";

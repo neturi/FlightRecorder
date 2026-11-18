@@ -13,6 +13,8 @@ The recorder has four layers:
 
 `sample_kernel()` is a portability boundary. On Linux it reads only safe, process-local fields from `/proc/self/status` (RSS and thread count); on other systems it records that the capability is unavailable. A production Linux build may add an eBPF collector behind this interface, but eBPF is optional because kernel versions, capabilities, distributions, and enterprise policy differ.
 
+Monitoring feeds can be integrated without making the recorder a network service. A Splunk forwarder or other enterprise collector should authenticate to an external HTTPS proxy, which validates the HEC token and forwards accepted syslog lines to `Recorder::ingest_syslog()`. The recorder classifies network, disk I/O, CPU, and system-hang messages and retains them in the same bounded, redacted evidence window. `poll_linux()` additionally samples `/proc/stat`, `/proc/diskstats`, and `/proc/net/dev`, and uses stale application heartbeats as a best-effort system-hang signal. The library deliberately does not open a socket or implement TLS.
+
 ## Why this shape
 
 | Option | Benefit | Cost / reason it is not the prerequisite |

@@ -11,6 +11,9 @@ int main(int argc, char** argv) {
 	recorder.progress("scheduler", "initializing", 10);
 	recorder.metric("scheduler", "queue_depth", 3);
 	recorder.sample_kernel();
+	recorder.poll_linux();
+	recorder.ingest_syslog("<5> network interface eth0 packet loss detected");
+	recorder.ingest_syslog("<4> disk I/O latency increased");
 	recorder.log("scheduler", "cloud upload deferred: endpoint unavailable");
 	recorder.report_failure("scheduler", "worker stopped making progress");
 	recorder.log("scheduler", "post-failure supervisor context retained");

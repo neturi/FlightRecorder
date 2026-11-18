@@ -28,7 +28,22 @@ void persistence() {
 	const auto path = std::filesystem::temp_directory_path() / "flight-recorder-test.frb";
 	assert(recorder.save(path)); auto loaded = Recorder::load(path); assert(loaded); assert(loaded->reason == "disk\tfailure"); assert(loaded->id == recorder.incident()->id); std::filesystem::remove(path);
 }
+void monitoring_ingestion() {
+	auto event = parse_syslog("<11> network interface eth0 down token=private");
+	assert(event); assert(event->kind == MonitoringKind::Network); assert(event->severity == "error");
+	Recorder recorder; recorder.start();
+	assert(recorder.ingest_syslog("<4> disk I/O latency increased password=hidden"));
+	assert(!recorder.ingest_syslog(""));
+	const auto records = recorder.recent();
+	assert(!records.empty());
+	for (const auto& record : records) assert(record.message.find("hidden") == std::string::npos);
+}
+void local_monitoring() {
+	Recorder recorder; recorder.start(); recorder.heartbeat("endpoint");
+	recorder.poll_linux();
+	assert(!recorder.recent().empty());
+}
 int main() {
-	bounded_retention(); privacy_and_context(); watchdog_and_scope(); persistence();
+	bounded_retention(); privacy_and_context(); watchdog_and_scope(); persistence(); monitoring_ingestion(); local_monitoring();
 	std::cout << "all flight recorder tests passed\n";
 }
